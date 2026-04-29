@@ -69,6 +69,11 @@ type ImageParams = {
 
 type MaskCoverage = "empty" | "partial" | "full";
 
+type ActiveRequestMeta = {
+  id: number;
+  messageIds: string[];
+};
+
 type MarkdownBlock =
   | {
       type: "paragraph" | "quote";
@@ -255,6 +260,8 @@ export default function ChatShell() {
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const activeRequestIdRef = useRef(0);
+  const activeRequestMetaRef = useRef<ActiveRequestMeta | null>(null);
+  const stoppedRequestIdsRef = useRef<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragCounterRef = useRef(0);
   const bootstrapStartedRef = useRef(false);
@@ -512,12 +519,31 @@ export default function ChatShell() {
     await loadSession(sessionId);
   }
 
+  function isRequestStopped(requestId: number) {
+    return stoppedRequestIdsRef.current.has(requestId) || activeRequestIdRef.current !== requestId;
+  }
+
   function stopCurrentRequest() {
-    activeRequestIdRef.current += 1;
+    const requestId = activeRequestIdRef.current;
+    const requestMeta = activeRequestMetaRef.current;
+
+    if (requestId > 0) {
+      stoppedRequestIdsRef.current.add(requestId);
+      activeRequestIdRef.current = requestId + 1;
+    }
+
     activeRequestRef.current?.abort();
     void activeReaderRef.current?.cancel().catch(() => undefined);
+
+    if (requestMeta?.messageIds.length) {
+      const messageIds = new Set(requestMeta.messageIds);
+      setMessages((previous) => previous.filter((message) => !messageIds.has(message.id)));
+    }
+
     activeReaderRef.current = null;
     activeRequestRef.current = null;
+    activeRequestMetaRef.current = null;
+    setError("");
     setLoading(false);
   }
 
@@ -622,6 +648,10 @@ export default function ChatShell() {
     const requestId = activeRequestIdRef.current + 1;
     activeRequestIdRef.current = requestId;
     activeRequestRef.current = controller;
+    activeRequestMetaRef.current = {
+      id: requestId,
+      messageIds: [assistantId]
+    };
     let streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
     setMessages((previous) => [
@@ -670,12 +700,16 @@ export default function ChatShell() {
       let buffer = "";
 
       while (true) {
-        if (controller.signal.aborted || activeRequestIdRef.current !== requestId) {
+        if (controller.signal.aborted || isRequestStopped(requestId)) {
           await reader.cancel().catch(() => undefined);
           throw new DOMException("The operation was aborted.", "AbortError");
         }
 
         const { done, value } = await reader.read();
+        if (controller.signal.aborted || isRequestStopped(requestId)) {
+          await reader.cancel().catch(() => undefined);
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -691,17 +725,28 @@ export default function ChatShell() {
           const payload = JSON.parse(parsed.data) as {
             text?: string;
             error?: string;
+            userMessage?: Message;
           };
 
+          if (parsed.event === "meta" && payload.userMessage) {
+            setMessages((previous) =>
+              isRequestStopped(requestId)
+                ? previous
+                : previous.map((message) => (message.id === userId ? payload.userMessage! : message))
+            );
+          }
+
           if (parsed.event === "delta" && payload.text) {
-            if (controller.signal.aborted || activeRequestIdRef.current !== requestId) {
+            if (controller.signal.aborted || isRequestStopped(requestId)) {
               await reader.cancel().catch(() => undefined);
               throw new DOMException("The operation was aborted.", "AbortError");
             }
             setMessages((previous) =>
-              previous.map((message) =>
-                message.id === assistantId ? { ...message, content: `${message.content}${payload.text}` } : message
-              )
+              isRequestStopped(requestId)
+                ? previous
+                : previous.map((message) =>
+                    message.id === assistantId ? { ...message, content: `${message.content}${payload.text}` } : message
+                  )
             );
           }
 
@@ -711,13 +756,20 @@ export default function ChatShell() {
         }
       }
 
+      if (controller.signal.aborted || isRequestStopped(requestId)) {
+        await reader.cancel().catch(() => undefined);
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+
       await refreshSessions();
+      if (controller.signal.aborted || isRequestStopped(requestId)) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
       await loadSession(sessionId);
     } catch (error) {
-      if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError" || activeRequestIdRef.current !== requestId) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError") || isRequestStopped(requestId)) {
         setError("");
-        setInput(text);
-        setMessages((previous) => previous.filter((item) => item.id !== userId && item.id !== assistantId));
+        setMessages((previous) => previous.filter((item) => item.id !== assistantId));
         void refreshSessions().catch(() => undefined);
         return;
       }
@@ -735,7 +787,13 @@ export default function ChatShell() {
       if (activeReaderRef.current === streamReader) {
         activeReaderRef.current = null;
       }
-      setLoading(false);
+      const shouldClearLoading = !activeRequestMetaRef.current || activeRequestMetaRef.current.id === requestId;
+      if (activeRequestMetaRef.current?.id === requestId) {
+        activeRequestMetaRef.current = null;
+      }
+      if (shouldClearLoading) {
+        setLoading(false);
+      }
     }
   }
 
@@ -766,13 +824,20 @@ export default function ChatShell() {
     setError("");
     setImagePrompt("");
     const controller = new AbortController();
+    const requestId = activeRequestIdRef.current + 1;
+    const userId = `tmp-image-user-${Date.now()}`;
+    activeRequestIdRef.current = requestId;
     activeRequestRef.current = controller;
+    activeRequestMetaRef.current = {
+      id: requestId,
+      messageIds: [userId]
+    };
 
     try {
       setMessages((previous) => [
         ...previous,
         {
-          id: `tmp-image-user-${Date.now()}`,
+          id: userId,
           role: "user",
           kind: "text",
           content: prompt
@@ -792,19 +857,21 @@ export default function ChatShell() {
         body: JSON.stringify(requestPayload)
       });
 
+      if (controller.signal.aborted || isRequestStopped(requestId)) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+
       setMessages((previous) => [
-        ...previous.filter((message) => !message.id.startsWith("tmp-image-user-")),
+        ...previous.filter((message) => message.id !== userId),
         payload.userMessage,
         payload.assistantMessage
       ]);
       clearInputImages();
       await refreshSessions();
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError") || isRequestStopped(requestId)) {
         setError("");
-        setImagePrompt(prompt);
-        setMessages((previous) => previous.filter((message) => !message.id.startsWith("tmp-image-user-")));
-        void refreshSessions().catch(() => undefined);
+        setMessages((previous) => previous.filter((message) => message.id !== userId));
         return;
       }
 
@@ -815,7 +882,13 @@ export default function ChatShell() {
       if (activeRequestRef.current === controller) {
         activeRequestRef.current = null;
       }
-      setLoading(false);
+      const shouldClearLoading = !activeRequestMetaRef.current || activeRequestMetaRef.current.id === requestId;
+      if (activeRequestMetaRef.current?.id === requestId) {
+        activeRequestMetaRef.current = null;
+      }
+      if (shouldClearLoading) {
+        setLoading(false);
+      }
     }
   }
 
@@ -992,8 +1065,19 @@ export default function ChatShell() {
                   ? "bg-[#ececec] text-black hover:bg-white"
                   : "bg-white text-black hover:bg-[#ececec] disabled:cursor-not-allowed disabled:bg-[#676767] disabled:text-[#2f2f2f]"
               }`}
-              type={loading ? "button" : "submit"}
-              onClick={loading ? stopCurrentRequest : undefined}
+              type="button"
+              onClick={() => {
+                if (loading) {
+                  stopCurrentRequest();
+                  return;
+                }
+
+                if (mode === "chat") {
+                  void sendChat();
+                } else {
+                  void generateImage();
+                }
+              }}
               title={loading ? "暂停生成" : mode === "chat" ? "发送" : "生成图片"}
             >
               {loading ? <StopGeneratingIcon /> : <SendIcon />}

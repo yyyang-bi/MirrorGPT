@@ -137,6 +137,25 @@ export async function POST(request: NextRequest) {
     }
   });
 
+  const savedUserMessage = await prisma.message.create({
+    data: {
+      sessionId: session.id,
+      role: "user",
+      kind: "text",
+      content: message
+    }
+  });
+
+  await prisma.chatSession.update({
+    where: {
+      id: session.id
+    },
+    data: {
+      ...(messageCount === 0 || session.title === "新会话" ? { title: titleFromText(message) } : {}),
+      updatedAt: new Date()
+    }
+  });
+
   let openAIResponse: Response;
   const upstreamController = new AbortController();
   const abortUpstreamRequest = () => upstreamController.abort();
@@ -206,19 +225,35 @@ export async function POST(request: NextRequest) {
 
       request.signal.addEventListener("abort", abortUpstream, { once: true });
 
+      if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
+        return;
+      }
+
       sse(controller, "meta", {
         sessionId: session.id,
-        model: body?.model?.trim() || providerConfig.chatModel
+        model: body?.model?.trim() || providerConfig.chatModel,
+        userMessage: savedUserMessage
       });
 
       try {
         while (true) {
+          if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
+            return;
+          }
+
           const { done, value } = await reader.read();
+          if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
+            return;
+          }
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
 
           while (true) {
+            if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
+              return;
+            }
+
             const boundary = findSSEBoundary(buffer);
             if (!boundary) break;
 
@@ -248,6 +283,9 @@ export async function POST(request: NextRequest) {
             const delta = getStreamDelta(payload);
 
             if (delta) {
+              if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
+                return;
+              }
               assistantText += delta;
               sse(controller, "delta", {
                 text: delta
@@ -263,7 +301,7 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        if (request.signal.aborted || streamCancelled) {
+        if (request.signal.aborted || streamCancelled || upstreamController.signal.aborted) {
           return;
         }
 
@@ -274,15 +312,6 @@ export async function POST(request: NextRequest) {
           if (!committedUsage.ok) {
             throw new Error(committedUsage.error);
           }
-
-          await prisma.message.create({
-            data: {
-              sessionId: session.id,
-              role: "user",
-              kind: "text",
-              content: message
-            }
-          });
 
           const savedMessage = await prisma.message.create({
             data: {
@@ -301,7 +330,6 @@ export async function POST(request: NextRequest) {
             id: session.id
           },
           data: {
-            ...(messageCount === 0 || session.title === "新会话" ? { title: titleFromText(message) } : {}),
             updatedAt: new Date()
           }
         });
@@ -312,7 +340,7 @@ export async function POST(request: NextRequest) {
           responseId
         });
       } catch (error) {
-        if (!request.signal.aborted) {
+        if (!request.signal.aborted && !streamCancelled && !upstreamController.signal.aborted) {
           sse(controller, "error", {
             error: error instanceof Error ? error.message : "流式响应解析失败"
           });
