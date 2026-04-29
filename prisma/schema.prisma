@@ -1,0 +1,45 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model ChatSession {
+  id        String           @id @default(cuid())
+  ownerId   String           @default("legacy")
+  title     String           @default("新会话")
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  messages  Message[]
+  images    GeneratedImage[]
+
+  @@index([ownerId, updatedAt])
+}
+
+model Message {
+  id        String      @id @default(cuid())
+  sessionId String
+  role      String
+  kind      String      @default("text")
+  content   String
+  imageUrl  String?
+  createdAt DateTime    @default(now())
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+}
+
+model GeneratedImage {
+  id            String      @id @default(cuid())
+  sessionId     String
+  prompt        String
+  imageUrl      String?
+  revisedPrompt String?
+  createdAt     DateTime    @default(now())
+  session       ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+}

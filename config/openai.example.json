@@ -1,0 +1,9 @@
+{
+  "apiKeys": [],
+  "baseUrl": "https://api.openai.com/v1",
+  "chatModel": "gpt-5.5",
+  "imageModel": "gpt-image-2",
+  "responsesImageModel": "gpt-5.5",
+  "imageApiMode": "images",
+  "imageCompatibilityMode": "auto"
+}

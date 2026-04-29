@@ -1,0 +1,15 @@
+{
+  "adminPassword": "admin123456",
+  "keys": [
+    {
+      "id": "dev-default",
+      "name": "默认访问密钥",
+      "key": "change-me-local",
+      "enabled": true,
+      "maxUses": 0,
+      "usedCount": 0,
+      "createdAt": "2026-04-27T00:00:00.000Z",
+      "lastUsedAt": null
+    }
+  ]
+}
