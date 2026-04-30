@@ -3,6 +3,7 @@ node_modules
 out
 dist
 *.log
+public/generated-images
 .env
 .env.local
 !.env.example

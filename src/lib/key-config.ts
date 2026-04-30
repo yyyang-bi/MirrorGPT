@@ -20,6 +20,7 @@ export type AuthConfig = {
 };
 
 export const AUTH_CONFIG_PATH = path.join(process.cwd(), "config", "auth.json");
+const AUTH_CONFIG_LOCK_PATH = `${AUTH_CONFIG_PATH}.lock`;
 
 const DEFAULT_CONFIG: AuthConfig = {
   adminPassword: "admin123456",
@@ -47,6 +48,57 @@ function ensureConfigFile() {
 
   if (!fs.existsSync(AUTH_CONFIG_PATH)) {
     fs.writeFileSync(AUTH_CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`, "utf8");
+  }
+}
+
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withAuthConfigLock<T>(operation: () => T): T {
+  const dir = path.dirname(AUTH_CONFIG_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const startedAt = Date.now();
+  let fd: number | null = null;
+
+  while (fd === null) {
+    try {
+      fd = fs.openSync(AUTH_CONFIG_LOCK_PATH, "wx");
+      fs.writeFileSync(fd, `${process.pid}:${new Date().toISOString()}`, "utf8");
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+      if (code !== "EEXIST") throw error;
+
+      try {
+        const stat = fs.statSync(AUTH_CONFIG_LOCK_PATH);
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          fs.unlinkSync(AUTH_CONFIG_LOCK_PATH);
+          continue;
+        }
+      } catch {
+        // 锁文件刚好被其他进程释放，继续重试。
+      }
+
+      if (Date.now() - startedAt > 5_000) {
+        throw new Error("认证配置正忙，请稍后重试。");
+      }
+
+      sleepSync(50);
+    }
+  }
+
+  try {
+    return operation();
+  } finally {
+    fs.closeSync(fd);
+    try {
+      fs.unlinkSync(AUTH_CONFIG_LOCK_PATH);
+    } catch {
+      // 锁文件已不存在时忽略。
+    }
   }
 }
 
@@ -92,11 +144,15 @@ export function readAuthConfig(): AuthConfig {
   }
 }
 
-export function writeAuthConfig(config: AuthConfig) {
+function writeAuthConfigUnlocked(config: AuthConfig) {
   ensureConfigFile();
   const normalized = normalizeConfig(config);
   fs.writeFileSync(AUTH_CONFIG_PATH, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
   return normalized;
+}
+
+export function writeAuthConfig(config: AuthConfig) {
+  return withAuthConfigLock(() => writeAuthConfigUnlocked(config));
 }
 
 export function generateAccessKey() {
@@ -121,29 +177,31 @@ export function generateAccessKey() {
 }
 
 export function createAccessKey(input: { name?: string; remark?: string; maxUses?: number }) {
-  const config = readAuthConfig();
-  const now = new Date().toISOString();
-  let key = generateAccessKey();
+  return withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    const now = new Date().toISOString();
+    let key = generateAccessKey();
 
-  while (config.keys.some((item) => item.key === key)) {
-    key = generateAccessKey();
-  }
+    while (config.keys.some((item) => item.key === key)) {
+      key = generateAccessKey();
+    }
 
-  const record: AccessKeyConfig = {
-    id: crypto.randomUUID(),
-    name: input.name?.trim() || "新访问密钥",
-    remark: input.remark?.trim() || "",
-    key,
-    enabled: true,
-    maxUses: Number.isFinite(Number(input.maxUses)) ? Math.max(0, Math.floor(Number(input.maxUses))) : 0,
-    usedCount: 0,
-    createdAt: now,
-    lastUsedAt: null
-  };
+    const record: AccessKeyConfig = {
+      id: crypto.randomUUID(),
+      name: input.name?.trim() || "新访问密钥",
+      remark: input.remark?.trim() || "",
+      key,
+      enabled: true,
+      maxUses: Number.isFinite(Number(input.maxUses)) ? Math.max(0, Math.floor(Number(input.maxUses))) : 0,
+      usedCount: 0,
+      createdAt: now,
+      lastUsedAt: null
+    };
 
-  config.keys.unshift(record);
-  writeAuthConfig(config);
-  return record;
+    config.keys.unshift(record);
+    writeAuthConfigUnlocked(config);
+    return record;
+  });
 }
 
 export function updateAccessKey(
@@ -156,72 +214,90 @@ export function updateAccessKey(
     resetUsedCount?: boolean;
   }
 ) {
-  const config = readAuthConfig();
-  const key = config.keys.find((item) => item.id === id);
+  return withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    const key = config.keys.find((item) => item.id === id);
 
-  if (!key) return null;
+    if (!key) return null;
 
-  if (typeof input.name === "string") {
-    key.name = input.name.trim() || key.name;
-  }
+    if (typeof input.name === "string") {
+      key.name = input.name.trim() || key.name;
+    }
 
-  if (typeof input.remark === "string") {
-    key.remark = input.remark.trim();
-  }
+    if (typeof input.remark === "string") {
+      key.remark = input.remark.trim();
+    }
 
-  if (typeof input.enabled === "boolean") {
-    key.enabled = input.enabled;
-  }
+    if (typeof input.enabled === "boolean") {
+      key.enabled = input.enabled;
+    }
 
-  if (input.maxUses !== undefined) {
-    key.maxUses = Math.max(0, Math.floor(Number(input.maxUses) || 0));
-  }
+    if (input.maxUses !== undefined) {
+      key.maxUses = Math.max(0, Math.floor(Number(input.maxUses) || 0));
+    }
 
-  if (input.resetUsedCount) {
-    key.usedCount = 0;
-    key.lastUsedAt = null;
-  }
+    if (input.resetUsedCount) {
+      key.usedCount = 0;
+      key.lastUsedAt = null;
+    }
 
-  writeAuthConfig(config);
-  return key;
+    writeAuthConfigUnlocked(config);
+    return key;
+  });
 }
 
 export function consumeAccessKeyDialog(id: string) {
-  const config = readAuthConfig();
-  const key = config.keys.find((item) => item.id === id);
+  return withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    const key = config.keys.find((item) => item.id === id);
 
-  if (!key) {
+    if (!key) {
+      return {
+        ok: false,
+        error: "访问密钥不存在，请重新登录。",
+        status: 401
+      };
+    }
+
+    if (!key.enabled) {
+      return {
+        ok: false,
+        error: "该访问密钥已停用。",
+        status: 403
+      };
+    }
+
+    if (key.maxUses > 0 && key.usedCount >= key.maxUses) {
+      return {
+        ok: false,
+        error: "该访问密钥的可用对话次数已用完。",
+        status: 403
+      };
+    }
+
+    key.usedCount += 1;
+    key.lastUsedAt = new Date().toISOString();
+    writeAuthConfigUnlocked(config);
+
     return {
-      ok: false,
-      error: "访问密钥不存在，请重新登录。",
-      status: 401
+      ok: true,
+      key
     };
-  }
+  });
+}
 
-  if (!key.enabled) {
-    return {
-      ok: false,
-      error: "该访问密钥已停用。",
-      status: 403
-    };
-  }
+export function refundAccessKeyDialog(id: string) {
+  return withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    const key = config.keys.find((item) => item.id === id);
 
-  if (key.maxUses > 0 && key.usedCount >= key.maxUses) {
-    return {
-      ok: false,
-      error: "该访问密钥的可用对话次数已用完。",
-      status: 403
-    };
-  }
+    if (!key) return false;
 
-  key.usedCount += 1;
-  key.lastUsedAt = new Date().toISOString();
-  writeAuthConfig(config);
+    key.usedCount = Math.max(0, key.usedCount - 1);
+    writeAuthConfigUnlocked(config);
 
-  return {
-    ok: true,
-    key
-  };
+    return true;
+  });
 }
 
 export function checkAccessKeyDialog(id: string) {
@@ -259,14 +335,16 @@ export function checkAccessKeyDialog(id: string) {
 }
 
 export function deleteAccessKey(id: string) {
-  const config = readAuthConfig();
-  const before = config.keys.length;
-  config.keys = config.keys.filter((item) => item.id !== id);
+  return withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    const before = config.keys.length;
+    config.keys = config.keys.filter((item) => item.id !== id);
 
-  if (config.keys.length === before) return false;
+    if (config.keys.length === before) return false;
 
-  writeAuthConfig(config);
-  return true;
+    writeAuthConfigUnlocked(config);
+    return true;
+  });
 }
 
 export function updateAdminPassword(adminPassword: string) {
@@ -276,7 +354,9 @@ export function updateAdminPassword(adminPassword: string) {
     throw new Error("管理密码至少需要 6 位。");
   }
 
-  const config = readAuthConfig();
-  config.adminPassword = nextPassword;
-  writeAuthConfig(config);
+  withAuthConfigLock(() => {
+    const config = readAuthConfig();
+    config.adminPassword = nextPassword;
+    writeAuthConfigUnlocked(config);
+  });
 }

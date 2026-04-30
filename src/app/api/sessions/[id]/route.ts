@@ -5,18 +5,19 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 type RouteContext = {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 };
 
 export async function GET(request: NextRequest, { params }: RouteContext) {
   const principal = requireAccessPrincipal(request);
   if (principal instanceof NextResponse) return principal;
+  const { id } = await params;
 
   const session = await prisma.chatSession.findFirst({
     where: {
-      id: params.id,
+      id,
       ownerId: principal.ownerId
     },
     include: {
@@ -50,6 +51,7 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
 export async function PATCH(request: NextRequest, { params }: RouteContext) {
   const principal = requireAccessPrincipal(request);
   if (principal instanceof NextResponse) return principal;
+  const { id } = await params;
 
   const body = (await request.json().catch(() => null)) as {
     title?: string;
@@ -67,7 +69,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
   const existingSession = await prisma.chatSession.findFirst({
     where: {
-      id: params.id,
+      id,
       ownerId: principal.ownerId
     }
   });
@@ -98,10 +100,11 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 export async function DELETE(request: NextRequest, { params }: RouteContext) {
   const principal = requireAccessPrincipal(request);
   if (principal instanceof NextResponse) return principal;
+  const { id } = await params;
 
   const result = await prisma.chatSession.deleteMany({
     where: {
-      id: params.id,
+      id,
       ownerId: principal.ownerId
     }
   });

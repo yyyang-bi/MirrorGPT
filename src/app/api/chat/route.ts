@@ -1,7 +1,14 @@
 import { requireAccessPrincipal } from "@/lib/auth";
-import { checkAccessKeyDialog, consumeAccessKeyDialog } from "@/lib/key-config";
+import { consumeAccessKeyDialog, refundAccessKeyDialog } from "@/lib/key-config";
 import { getOpenAIConfig, getOpenAIHeaders, normalizeOpenAIError } from "@/lib/openai";
 import { prisma } from "@/lib/prisma";
+import {
+  getTextLengthError,
+  MAX_CHAT_HISTORY_MESSAGES,
+  MAX_CHAT_MESSAGE_CHARS,
+  MAX_CHAT_REQUEST_BYTES,
+  readJsonBodyWithLimit
+} from "@/lib/request-limits";
 import { ensureSession, titleFromText } from "@/lib/sessions";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -76,13 +83,33 @@ export async function POST(request: NextRequest) {
   const principal = requireAccessPrincipal(request);
   if (principal instanceof NextResponse) return principal;
 
-  const body = (await request.json().catch(() => null)) as ChatBody | null;
+  const parsedBody = await readJsonBodyWithLimit<ChatBody>(request, MAX_CHAT_REQUEST_BYTES);
+  if (parsedBody.error) {
+    return NextResponse.json(
+      {
+        error: parsedBody.error
+      },
+      { status: parsedBody.status || 400 }
+    );
+  }
+
+  const body = parsedBody.body;
   const message = body?.message?.trim();
 
   if (!message) {
     return NextResponse.json(
       {
         error: "消息不能为空。"
+      },
+      { status: 400 }
+    );
+  }
+
+  const messageLengthError = getTextLengthError("消息", message, MAX_CHAT_MESSAGE_CHARS);
+  if (messageLengthError) {
+    return NextResponse.json(
+      {
+        error: messageLengthError
       },
       { status: 400 }
     );
@@ -112,49 +139,81 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const usage = checkAccessKeyDialog(principal.keyId);
-  if (!usage.ok) {
+  const reservedUsage = consumeAccessKeyDialog(principal.keyId);
+  if (!reservedUsage.ok) {
     return NextResponse.json(
       {
-        error: usage.error
+        error: reservedUsage.error
       },
-      { status: usage.status }
+      { status: reservedUsage.status }
     );
   }
 
-  const messageCount = await prisma.message.count({
-    where: {
-      sessionId: session.id
+  const refundReservedUsage = (reason: string) => {
+    try {
+      refundAccessKeyDialog(principal.keyId);
+    } catch (error) {
+      console.error("[api/chat] refund_failed", {
+        sessionId: session.id,
+        reason,
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
-  });
+  };
 
-  const history = await prisma.message.findMany({
-    where: {
-      sessionId: session.id
-    },
-    orderBy: {
-      createdAt: "asc"
-    }
-  });
+  let preflight;
 
-  const savedUserMessage = await prisma.message.create({
-    data: {
-      sessionId: session.id,
-      role: "user",
-      kind: "text",
-      content: message
-    }
-  });
+  try {
+    preflight = await (async () => {
+      const messageCount = await prisma.message.count({
+        where: {
+          sessionId: session.id
+        }
+      });
 
-  await prisma.chatSession.update({
-    where: {
-      id: session.id
-    },
-    data: {
-      ...(messageCount === 0 || session.title === "新会话" ? { title: titleFromText(message) } : {}),
-      updatedAt: new Date()
-    }
-  });
+      const history = (await prisma.message.findMany({
+        where: {
+          sessionId: session.id
+        },
+        orderBy: {
+          createdAt: "desc"
+        },
+        take: MAX_CHAT_HISTORY_MESSAGES
+      })).reverse();
+
+      const savedUserMessage = await prisma.message.create({
+        data: {
+          sessionId: session.id,
+          role: "user",
+          kind: "text",
+          content: message
+        }
+      });
+
+      await prisma.chatSession.update({
+        where: {
+          id: session.id
+        },
+        data: {
+          ...(messageCount === 0 || session.title === "新会话" ? { title: titleFromText(message) } : {}),
+          updatedAt: new Date()
+        }
+      });
+
+      return {
+        history,
+        savedUserMessage
+      };
+    })();
+  } catch (error) {
+    refundReservedUsage("preflight_db_failed");
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? `消息保存失败：${error.message}` : "消息保存失败。"
+      },
+      { status: 500 }
+    );
+  }
 
   let openAIResponse: Response;
   const upstreamController = new AbortController();
@@ -167,10 +226,10 @@ export async function POST(request: NextRequest) {
       headers,
       signal: upstreamController.signal,
       body: JSON.stringify({
-        model: body?.model?.trim() || providerConfig.chatModel,
+        model: providerConfig.chatModel,
         stream: true,
         messages: [
-          ...history.map((item) => ({
+          ...preflight.history.map((item) => ({
             role: item.role === "assistant" ? "assistant" : "user",
             content: item.kind === "image" ? `[图片消息] ${item.content}` : item.content
           })),
@@ -187,6 +246,8 @@ export async function POST(request: NextRequest) {
       return new Response(null, { status: 499 });
     }
 
+    refundReservedUsage("upstream_request_failed");
+
     return NextResponse.json(
       {
         error: error instanceof Error ? `OpenAI 网络请求失败：${error.message}` : "OpenAI 网络请求失败。"
@@ -198,6 +259,7 @@ export async function POST(request: NextRequest) {
   if (!openAIResponse.ok || !openAIResponse.body) {
     request.signal.removeEventListener("abort", abortUpstreamRequest);
     const payload = await openAIResponse.json().catch(() => null);
+    refundReservedUsage("upstream_error_response");
     return NextResponse.json(
       {
         error: normalizeOpenAIError(payload, `OpenAI 接口错误：${openAIResponse.status}`)
@@ -231,8 +293,8 @@ export async function POST(request: NextRequest) {
 
       sse(controller, "meta", {
         sessionId: session.id,
-        model: body?.model?.trim() || providerConfig.chatModel,
-        userMessage: savedUserMessage
+        model: providerConfig.chatModel,
+        userMessage: preflight.savedUserMessage
       });
 
       try {
@@ -308,11 +370,6 @@ export async function POST(request: NextRequest) {
         let savedMessageId: string | undefined;
 
         if (assistantText.trim()) {
-          const committedUsage = consumeAccessKeyDialog(principal.keyId);
-          if (!committedUsage.ok) {
-            throw new Error(committedUsage.error);
-          }
-
           const savedMessage = await prisma.message.create({
             data: {
               sessionId: session.id,
@@ -341,6 +398,10 @@ export async function POST(request: NextRequest) {
         });
       } catch (error) {
         if (!request.signal.aborted && !streamCancelled && !upstreamController.signal.aborted) {
+          if (!assistantText.trim()) {
+            refundReservedUsage("empty_stream_failed");
+          }
+
           sse(controller, "error", {
             error: error instanceof Error ? error.message : "流式响应解析失败"
           });

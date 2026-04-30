@@ -128,6 +128,7 @@ const generatingDots = Array.from({ length: 22 * 18 }, (_, index) => {
 const IMAGE_INPUT_LIMIT = 16;
 // 遮罩编辑先下线保留代码，后续需要时改为 true 即可恢复入口。
 const ENABLE_IMAGE_MASK_EDITOR = false;
+const DISPLAY_IMAGE_MODEL = "gpt-image-2";
 
 const DEFAULT_IMAGE_PARAMS: ImageParams = {
   size: "auto",
@@ -1566,7 +1567,7 @@ function ModeSelector({
     {
       value: "image",
       label: "生图",
-      model: models?.imageModel || "读取中",
+      model: DISPLAY_IMAGE_MODEL,
       icon: (
         <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
           <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>

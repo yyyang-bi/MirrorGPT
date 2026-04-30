@@ -23,6 +23,12 @@ const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
   imageCompatibilityMode: "auto"
 };
 
+const CLIPROXY_IMAGE_DEFAULT_BASE_URL = "http://115.190.138.26:8317/v1";
+
+function shouldDefaultImageModeToResponses(baseUrl: string) {
+  return baseUrl.replace(/\/+$/, "").toLowerCase() === CLIPROXY_IMAGE_DEFAULT_BASE_URL;
+}
+
 function ensureConfigFile() {
   const dir = path.dirname(PROVIDER_CONFIG_PATH);
 
@@ -66,15 +72,21 @@ export function parseApiKeys(input: unknown) {
 
 function normalizeProviderConfig(input: Partial<ProviderConfig> | null | undefined): ProviderConfig {
   const apiKeys = parseApiKeys(input?.apiKeys);
-  const imageApiMode = input?.imageApiMode === "responses" ? "responses" : DEFAULT_PROVIDER_CONFIG.imageApiMode;
+  const baseUrl = normalizeBaseUrl(input?.baseUrl);
+  const imageApiMode =
+    input?.imageApiMode === "responses" || input?.imageApiMode === "images"
+      ? input.imageApiMode
+      : shouldDefaultImageModeToResponses(baseUrl)
+        ? "responses"
+        : DEFAULT_PROVIDER_CONFIG.imageApiMode;
   const imageCompatibilityMode =
-    input?.imageCompatibilityMode === "standard" || input?.imageCompatibilityMode === "codex"
+    input?.imageCompatibilityMode === "standard" || input?.imageCompatibilityMode === "codex" || input?.imageCompatibilityMode === "auto"
       ? input.imageCompatibilityMode
       : DEFAULT_PROVIDER_CONFIG.imageCompatibilityMode;
 
   return {
     apiKeys,
-    baseUrl: normalizeBaseUrl(input?.baseUrl),
+    baseUrl,
     chatModel: input?.chatModel?.trim() || DEFAULT_PROVIDER_CONFIG.chatModel,
     imageModel: input?.imageModel?.trim() || DEFAULT_PROVIDER_CONFIG.imageModel,
     responsesImageModel: input?.responsesImageModel?.trim() || DEFAULT_PROVIDER_CONFIG.responsesImageModel,
