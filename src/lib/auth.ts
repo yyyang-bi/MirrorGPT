@@ -230,10 +230,19 @@ export function loginWithCredential(input: string): LoginResult {
   };
 }
 
+function getCookieSecure() {
+  const configured = process.env.AUTH_COOKIE_SECURE ?? process.env.COOKIE_SECURE;
+  if (configured !== undefined) {
+    return ["1", "true", "yes", "on"].includes(configured.trim().toLowerCase());
+  }
+
+  return process.env.NODE_ENV === "production";
+}
+
 export const authCookieOptions = {
   httpOnly: true,
   sameSite: "lax" as const,
-  secure: process.env.NODE_ENV === "production",
+  secure: getCookieSecure(),
   path: "/",
   maxAge: 60 * 60 * 24 * 30
 };
