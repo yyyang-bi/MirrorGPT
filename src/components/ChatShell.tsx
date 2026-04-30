@@ -251,6 +251,7 @@ export default function ChatShell() {
   const [accessKeyInfo, setAccessKeyInfo] = useState<AccessKeyInfo | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModelInfo | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ChatSearchResult[]>([]);
@@ -359,6 +360,25 @@ export default function ChatShell() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [searchOpen]);
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileSidebarOpen(false);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileSidebarOpen]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1090,13 +1110,94 @@ export default function ChatShell() {
   );
 
   return (
-    <main className="flex h-screen overflow-hidden bg-[#212121] text-[#ececec]">
+    <main className="flex h-dvh overflow-hidden bg-[#212121] text-[#ececec]">
       {isDraggingImage ? (
         <div className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-sm">
           <div className="rounded-3xl border border-dashed border-blue-300/70 bg-blue-500/10 px-8 py-6 text-center shadow-2xl">
             <p className="text-lg font-semibold text-blue-100">释放以添加参考图</p>
             <p className="mt-1 text-sm text-blue-100/70">最多 {IMAGE_INPUT_LIMIT} 张，支持 JPG、PNG、WebP 等图片格式</p>
           </div>
+        </div>
+      ) : null}
+
+      {mobileSidebarOpen ? (
+        <div className="fixed inset-0 z-50 flex bg-black/55 backdrop-blur-sm md:hidden" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            className="absolute inset-0 cursor-default"
+            aria-label="关闭侧边栏"
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+          <aside className="relative flex h-full w-[min(86vw,320px)] flex-col bg-[#171717] text-[#ececec] shadow-2xl">
+            <div className="flex h-14 items-center justify-between px-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg text-[#ececec]" title="ChatGPT">
+                <ChatGPTMarkIcon />
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileSidebarOpen(false)}
+                className="grid h-10 w-10 place-items-center rounded-lg text-2xl leading-none text-[#b4b4b4] transition hover:bg-[#212121] hover:text-white"
+                title="关闭侧边栏"
+                aria-label="关闭侧边栏"
+              >
+                ×
+              </button>
+            </div>
+
+            <nav className="flex flex-col gap-0.5 px-3 mt-2">
+              <SidebarAction
+                icon={<NewChatIcon />}
+                label="新聊天"
+                onClick={() => {
+                  void createSession().finally(() => setMobileSidebarOpen(false));
+                }}
+              />
+              <SidebarAction
+                icon={<SearchIcon />}
+                label="搜索聊天"
+                onClick={() => {
+                  setMobileSidebarOpen(false);
+                  openSearch();
+                }}
+              />
+            </nav>
+
+            <div className="chat-scrollbar mt-4 flex-1 overflow-y-auto px-3">
+              <p className="px-2 pb-2 text-xs font-medium text-[#9b9b9b]">最近</p>
+              {sessions.length === 0 ? (
+                <p className="rounded-lg px-2 py-3 text-sm text-[#8f8f8f]">暂无历史会话</p>
+              ) : (
+                sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`group relative mb-0.5 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm transition ${
+                      activeSessionId === session.id ? "bg-[#212121] text-[#ececec]" : "text-[#ececec] hover:bg-[#212121]"
+                    }`}
+                  >
+                    <button
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => {
+                        void loadSession(session.id).finally(() => setMobileSidebarOpen(false));
+                      }}
+                    >
+                      <p className="truncate">{session.title}</p>
+                    </button>
+                    <button
+                      onClick={() => void deleteSession(session.id)}
+                      className="rounded px-1.5 py-1 text-[#b4b4b4] transition hover:bg-[#333333] hover:text-[#ececec]"
+                      title="删除会话"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="mt-2 flex flex-col gap-1 p-3 pt-0">
+              <KeyUsageCard accessKey={accessKeyInfo} onLogout={() => void logout()} />
+            </div>
+          </aside>
         </div>
       ) : null}
 
@@ -1189,9 +1290,21 @@ export default function ChatShell() {
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col bg-[#212121]">
-        <header className="flex h-14 shrink-0 items-center justify-between px-4 md:px-8">
-          <div className="flex items-center gap-2">
+        <header className="flex h-14 shrink-0 items-center justify-between px-3 md:px-8">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-[#ececec] transition hover:bg-white/10 md:hidden"
+              aria-label="打开侧边栏"
+              title="打开侧边栏"
+            >
+              <SidebarIcon />
+            </button>
             <TopModelMenu models={providerModels} onChooseMode={setMode} />
+            <span className="hidden max-w-[42vw] truncate text-sm text-[#b4b4b4] sm:inline md:hidden">
+              {activeSession?.title || "新会话"}
+            </span>
           </div>
           <div className="grid h-8 w-8 place-items-center rounded-full bg-blue-600 text-sm font-semibold text-white ring-1 ring-white/10 cursor-pointer">
             {getKeyInitial(accessKeyInfo?.name)}
