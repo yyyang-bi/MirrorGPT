@@ -1,0 +1,34 @@
+services:
+  mirrorgpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mirrorgpt
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      DATABASE_URL: "file:../data/chat_sessions.db"
+
+      # 首次启动且 config/openai.json 不存在时，会用这些环境变量生成默认 Provider 配置。
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_CHAT_MODEL: "${OPENAI_CHAT_MODEL:-gpt-5.5}"
+      OPENAI_IMAGE_MODEL: "${OPENAI_IMAGE_MODEL:-gpt-image-2}"
+      OPENAI_RESPONSES_IMAGE_MODEL: "${OPENAI_RESPONSES_IMAGE_MODEL:-gpt-5.5}"
+
+      # 只有确认前置 Nginx/Caddy 会覆盖 X-Forwarded-For 时才改成 true。
+      TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./public/generated-images:/app/public/generated-images
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
